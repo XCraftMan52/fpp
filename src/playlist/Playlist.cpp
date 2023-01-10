@@ -216,6 +216,9 @@ Json::Value Playlist::LoadJSON(const char* filename) {
     Json::Value root;
 
     if (!LoadJsonFromFile(filename, root)) {
+        std::string warn = "Could not load playlist ";
+        warn += filename;
+        WarningHolder::AddWarningTimeout(warn, 30);
         LogErr(VB_PLAYLIST, "Error loading %s\n", filename);
         return root;
     }
@@ -340,9 +343,31 @@ int Playlist::Load(const char* filename) {
 
         mp.append(pe);
         root["mainPlaylist"] = mp;
+    
     } else {
-        m_filename = FPP_DIR_PLAYLIST("/" + filename + ".json");
-        root = LoadJSON(m_filename.c_str());
+        if (IsExtensionAudio(GetFileExtension(tmpFilename)) || IsExtensionVideo(GetFileExtension(tmpFilename))) {
+           root["name"] = tmpFilename;
+           root["repeat"] = 0;
+           root["loopCount"] = 0;
+
+           Json::Value mp(Json::arrayValue);
+           Json::Value pe;
+
+           pe["type"] = "media";
+           pe["mediaName"] = tmpFilename;
+
+           LogDebug(VB_PLAYLIST, "Generated an on-the-fly playlist for %s\n", tmpFilename.c_str());
+        
+           pe["enabled"] = 1;
+           pe["playOnce"] = 0;
+           pe["videoOut"] = "--Default--";
+           mp.append(pe);
+           root["mainPlaylist"] = mp;
+   
+        } else {
+           m_filename = FPP_DIR_PLAYLIST("/" + filename + ".json");
+           root = LoadJSON(m_filename.c_str());
+        }
     }
 
     int res = Load(root);
@@ -481,6 +506,10 @@ int Playlist::Start(void) {
     if ((!m_leadIn.size()) &&
         (!m_mainPlaylist.size()) &&
         (!m_leadOut.size())) {
+        
+        std::string warn = "Playlist " + GetPlaylistName() + " is empty. Nothing to play.";
+        WarningHolder::AddWarningTimeout(warn, 30);
+
         SetIdle();
         return 0;
     }
@@ -670,12 +699,15 @@ int Playlist::Process(void) {
 
     //LogExcess(VB_PLAYLIST, "Playlist::Process: %s, section %s, position: %d\n", m_name.c_str(), m_currentSectionStr.c_str(), m_sectionPosition);
 
-    while (!PL_CLEANUPS.empty()) {
-        Playlist* p = PL_CLEANUPS.front();
-        delete p;
-        PL_CLEANUPS.pop_front();
+    if (!PL_CLEANUPS.empty()) {
+        PL_CLEANUPS.sort();
+        PL_CLEANUPS.unique();
+        while (!PL_CLEANUPS.empty()) {
+            Playlist* p = PL_CLEANUPS.front();
+            delete p;
+            PL_CLEANUPS.pop_front();
+        }
     }
-
     std::unique_lock<std::recursive_mutex> lck(m_playlistMutex);
 
     if (m_currentSection == nullptr || m_sectionPosition >= m_currentSection->size()) {
@@ -846,6 +878,13 @@ int Playlist::Process(void) {
             m_currentSection->at(m_sectionPosition)->StartPlaying();
         }
 
+        while (!startNewPlaylistFilename.empty()) {
+            StopNow(1);
+            std::string nm = startNewPlaylistFilename;
+            startNewPlaylistFilename = "";
+            Play(nm.c_str(), startNewPlaylistPosition, startNewPlaylistRepeat, startNewPlaylistScheduleEntry, startNewPlaylistEndPosition);
+        }
+        
         PluginManager::INSTANCE.playlistCallback(GetInfo(), "playing", m_currentSectionStr, m_sectionPosition);
         if (mqtt) {
             mqtt->Publish("playlist/section/status", m_currentSectionStr);
@@ -884,6 +923,7 @@ Playlist* Playlist::SwitchToInsertedPlaylist(bool isStopping) {
         } else {
             pl = new Playlist(this);
         }
+        std::string plname = m_insertedPlaylist;
         pl->Play(m_insertedPlaylist.c_str(), m_insertedPlaylistPosition, 0, m_scheduleEntry, m_insertedPlaylistEndPosition);
         m_insertedPlaylist = "";
         if (pl->IsPlaying()) {
@@ -891,7 +931,7 @@ Playlist* Playlist::SwitchToInsertedPlaylist(bool isStopping) {
             playlist = pl;
             return playlist;
         } else {
-            delete pl;
+            PL_CLEANUPS.push_back(pl);
         }
     }
     return nullptr;
@@ -1030,8 +1070,22 @@ int Playlist::Play(const char* filename, const int position, const int repeat, c
             Start();
             return 1;
         } else if (m_currentSection) {
-            StopNow(1);
-            sleep(1);
+            PlaylistEntryCommand *pec = dynamic_cast<PlaylistEntryCommand*>(m_currentSection->at(m_sectionPosition));
+            PlaylistEntryScript *pes = dynamic_cast<PlaylistEntryScript*>(m_currentSection->at(m_sectionPosition));
+            if (pec || pes) {
+                // We cannot stop the current playlist and start a new one as the entry itself will be deleted
+                // while within a method of the entry.   Thus, we'll record the settings and then
+                // stop the playlist when safe to do so.
+                startNewPlaylistFilename = filename;
+                startNewPlaylistPosition = position;
+                startNewPlaylistRepeat = repeat;
+                startNewPlaylistScheduleEntry = scheduleEntry;
+                startNewPlaylistEndPosition = endPosition;
+                return 1;
+            } else {
+                StopNow(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
         }
     }
     m_scheduleEntry = scheduleEntry;

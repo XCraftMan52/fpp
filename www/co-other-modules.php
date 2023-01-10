@@ -278,7 +278,7 @@ $hasSPI = false;
 foreach (scandir("/dev/") as $fileName) {
     if (preg_match("/^spidev[0-9]/", $fileName)) {
         echo "SPIDevices['$fileName'] = '$fileName';\n";
-	$hasSPI = true;
+        $hasSPI = true;
     }
 }
 ?>
@@ -310,19 +310,17 @@ $hasI2C = false;
 foreach (scandir("/dev/") as $fileName) {
     if (preg_match("/^i2c-[0-9]/", $fileName)) {
         echo "I2CDevices['$fileName'] = '$fileName';\n";
-	$hasI2C = true;
+        $hasI2C = true;
     }
 }
 ?>
 
 var FBDevices = new Array();
 <?
-if ($settings["Platform"] != "MacOS") {
-    foreach (scandir("/dev/") as $fileName) {
-        if (preg_match("/^fb[0-9]+/", $fileName)) {
-            echo "FBDevices['$fileName'] = '$fileName';\n";
-        }
-    }
+exec($SUDO . " " . $settings["fppBinDir"] . "/fpp -FB", $output, $return_val);
+$js = json_decode($output[0]);
+foreach ($js as $devname) {
+    echo "FBDevices['$devname'] = '$devname';\n";
 }
 ?>
 
@@ -333,10 +331,10 @@ $json = file_get_contents('http://localhost/api/models');
 $models = json_decode($json, true);
 foreach ($models as $model) {
     $modelName = $model['Name'];
-
+    $pixelSize = isset($model['PixelSize']) ? $model['PixelSize'] : 1;
     if ((($model['Type'] == 'FB') || ($model['Type'] == 'Sub')) && ($modelName != 'FB - fb0') && ($modelName != 'FB - fb1')) {
-        $width = intval($model['Width'] / $model['PixelSize']);
-        $height = intval($model['Height'] / $model['PixelSize']);
+        $width = intval($model['Width'] / $pixelSize);
+        $height = intval($model['Height'] / $pixelSize);
         echo "PixelOverlayModels['$modelName'] = '$modelName (" . $width . 'x' . $height . ")';\n";
         echo "PixelOverlayModelChannels['$modelName'] = " . $model['ChannelCount'] . ";\n";
     }
@@ -924,13 +922,13 @@ if (Object.keys(SerialDevices).length > 0) {
 //Outputs for Raspberry Pi or Beagle
 <?
 if ($hasI2C) {
-?>
+    ?>
     output_modules.push(new I2COutput("MCP23017", "MCP23017", 16, false, false, {deviceID: 0x20} , 0x20, 0x27));
     output_modules.push(new PCA9685Output());
 <?
 }
 if ($hasSPI) {
-?> 
+    ?>
     output_modules.push(new GenericSPIDevice());
 <?
 }

@@ -63,7 +63,24 @@ PATH=$PATH:/usr/sbin:/sbin
 
 # CPU Count
 CPUS=$(grep "^processor" /proc/cpuinfo | wc -l)
-
+if [[ ${CPUS} -gt 1 ]]; then
+    MEMORY=$(grep MemTot /proc/meminfo | awk '{print $2}')
+    if [[ ${MEMORY} -lt 425000 ]]; then
+        # very limited memory, only use one core or we'll fail or
+        # will be very slow as we constantly swap in/out
+        CPUS=1
+    elif [[ ${MEMORY} -lt 512000 ]]; then
+        SWAPTOTAL=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
+        # Limited memory, if we have some swap, we'll go ahead with -j 2
+        # otherwise we'll need to stick with -j 1 or we run out of memory
+        if [[ ${SWAPTOTAL} -gt 49000 ]]; then
+            CPUS=2
+        else
+            CPUS=1
+        fi
+    fi
+fi
+        
 #############################################################################
 # Some Helper Functions
 #############################################################################
@@ -174,6 +191,9 @@ then
 elif [ "x${OSID}" = "xubuntu" ]
 then
 	FPPPLATFORM="Ubuntu"
+elif [ "x${OSID}" = "xlinuxmint" ]
+then
+	FPPPLATFORM="Mint"
 elif [ "x${OSID}" = "xfedora" ]
 then
     FPPPLATFORM="Fedora"
@@ -225,6 +245,8 @@ echo "FPP Branch       : ${FPPBRANCH}"
 echo "Operating System : ${PRETTY_NAME}"
 echo "Platform         : ${FPPPLATFORM}"
 echo "OS Version       : ${OSVER}"
+echo "OS ID            : ${OSID}"
+echo "Image            : ${isimage}"
 echo "============================================================"
 #############################################################################
 
@@ -345,7 +367,7 @@ cd /opt 2> /dev/null || mkdir /opt
 export DEBIAN_FRONTEND=noninteractive
 
 case "${OSVER}" in
-	debian_11 | debian_10 | ubuntu_20.04 | ubuntu_22.04)
+	debian_11 | debian_10 | ubuntu_20.04 | ubuntu_22.04 | ubuntu_22.10 | linuxmint_21)
 		case $FPPPLATFORM in
 			'BeagleBone Black')
 				echo "FPP - Skipping non-free for $FPPPLATFORM"
@@ -374,8 +396,25 @@ case "${OSVER}" in
         if $skip_apt_install; then
             PACKAGE_REMOVE=""
         fi
+        
         if [ "x${PACKAGE_REMOVE}" != "x" ]; then
+            # Need to make sure there is configuration for eth0 or uninstalling dhcpclient will cause network to drop
+            rm -f /etc/systemd/network/50-default.network
+            wget -O /etc/systemd/network/50-default.network https://raw.githubusercontent.com/FalconChristmas/fpp/master/etc/systemd/network/50-default.network
+            systemctl reload systemd-networkd
             apt-get remove -y --purge --autoremove --allow-change-held-packages ${PACKAGE_REMOVE}
+            
+            systemctl unmask systemd-networkd
+            systemctl unmask systemd-resolved
+
+            systemctl restart systemd-networkd
+            systemctl restart systemd-resolved
+
+            systemctl enable systemd-networkd
+            systemctl enable systemd-resolved
+
+            echo "FPP - Sleeping 5 seconds to make sure network is available"
+            sleep 5
         fi
         
 
@@ -415,8 +454,9 @@ case "${OSVER}" in
 		# Install 10 packages, then clean to lower total disk space required
   
         PHPVER=""
-        if [ "${OSVER}" == "ubuntu_22.04" ]; then
+        if [ "${OSVER}" == "ubuntu_22.04" -o "${OSVER}" == "linuxmint_21" ]; then
             PHPVER="7.4"
+            echo "FPP - Forceing PHP 7.4"
             apt install software-properties-common apt-transport-https -y
             add-apt-repository ppa:ondrej/php -y
             apt-get -y update
@@ -437,12 +477,15 @@ case "${OSVER}" in
                       git gettext apt-utils x265 libtheora-dev libvorbis-dev libx265-dev iputils-ping \
                       libmosquitto-dev mosquitto-clients mosquitto libzstd-dev lzma zstd gpiod libgpiod-dev libjsoncpp-dev libcurl4-openssl-dev \
                       fonts-freefont-ttf flex bison pkg-config libasound2-dev mesa-common-dev \
-                      flex bison pkg-config libasound2-dev python3-distutils libssl-dev libtool"
+                      flex bison pkg-config libasound2-dev python3-distutils libssl-dev libtool bsdextrautils iw"
 
         if [ "$FPPPLATFORM" == "Raspberry Pi" -o "$FPPPLATFORM" == "BeagleBone Black" ]; then
             PACKAGE_LIST="$PACKAGE_LIST firmware-realtek firmware-atheros firmware-ralink firmware-brcm80211 firmware-iwlwifi firmware-libertas firmware-zd1211 firmware-ti-connectivity zram-tools"
         else
             PACKAGE_LIST="$PACKAGE_LIST ccache"
+        fi
+        if [ "$FPPPLATFORM" != "BeagleBone Black" ]; then
+            PACKAGE_LIST="$PACKAGE_LIST libva-dev"
         fi
         if [ ! $desktop ]; then
             PACKAGE_LIST="$PACKAGE_LIST networkd-dispatcher"
@@ -467,7 +510,7 @@ case "${OSVER}" in
 
 
 		echo "FPP - Installing libhttpserver 0.18.2"
-		(cd /opt/ && git clone https://github.com/etr/libhttpserver && cd libhttpserver && git checkout 0.18.2 && ./bootstrap && autoupdate && ./bootstrap && mkdir build && cd build && ../configure --prefix=/usr && make -j ${CPUS} && make install && cd /opt/ && rm -rf /opt/libhttpserver)
+		(cd /opt/ && git clone https://github.com/etr/libhttpserver && cd libhttpserver && git checkout 0.18.2 && ./bootstrap && autoupdate && ./bootstrap && mkdir build && cd build && ../configure --prefix=/usr --disable-examples && make -j ${CPUS} && make install && cd /opt/ && rm -rf /opt/libhttpserver)
 
         echo "FPP - Configuring shellinabox to use /var/tmp"
         echo "SHELLINABOX_DATADIR=/var/tmp/" >> /etc/default/shellinabox
@@ -801,8 +844,11 @@ EOF
             
         fi
 		;;
-	'Ununtu')
-		echo "FPP - Ununtu"
+	'Ubuntu')
+		echo "FPP - Ubuntu"
+		;;
+    'Mint')
+		echo "FPP - Mint"
 		;;
 	'Debian')
 		echo "FPP - Debian"
@@ -878,6 +924,9 @@ sh scripts/upgrade_config -notee
 
 #######################################
 PHPDIR="/etc/php/7.4"
+if [ "${OSVER}" == "ubuntu_22.10" ]; then
+    PHPDIR="/etc/php/8.1"
+fi
 
 echo "FPP - Allowing short tags in PHP"
 FILES="cli/php.ini apache2/php.ini"
@@ -972,6 +1021,9 @@ echo >> ${FPPHOME}/.bashrc
 
 mkdir ${FPPHOME}/media/logs
 chown fpp.fpp ${FPPHOME}/media/logs
+
+ln -f -s "${FPPHOME}/media/config/.htaccess" /opt/fpp/www/.htaccess
+ln -f -s "${FPPHOME}/media/config/proxies" /opt/fpp/www/proxy/.htaccess
 
 #######################################
 # Configure log rotation
@@ -1098,12 +1150,15 @@ EOF
 
     #######################################
     # Config fstab to mount some filesystems as tmpfs
-    echo "FPP - Configuring tmpfs filesystems"
-    sed -i 's|tmpfs\s*/tmp\s*tmpfs.*||g' /etc/fstab
-    echo "#####################################" >> /etc/fstab
-    echo "tmpfs         /tmp        tmpfs   nodev,nosuid,size=50M 0 0" >> /etc/fstab
-    echo "tmpfs         /var/tmp    tmpfs   nodev,nosuid,size=50M 0 0" >> /etc/fstab
-    echo "#####################################" >> /etc/fstab
+    ARCH=$(uname -m)
+    if [ "$ARCH" != "x86_64" ]; then
+        echo "FPP - Configuring tmpfs filesystems"
+        sed -i 's|tmpfs\s*/tmp\s*tmpfs.*||g' /etc/fstab
+        echo "#####################################" >> /etc/fstab
+        echo "tmpfs         /tmp        tmpfs   nodev,nosuid,size=50M 0 0" >> /etc/fstab
+        echo "tmpfs         /var/tmp    tmpfs   nodev,nosuid,size=50M 0 0" >> /etc/fstab
+        echo "#####################################" >> /etc/fstab
+    fi
 
     COMMENTED=""
     SDA1=$(lsblk -l | grep sda1 | awk '{print $7}')
@@ -1150,7 +1205,7 @@ sed -i -e "s/error\.log/apache2-base-error.log/" /etc/apache2/apache2.conf
 rm /etc/apache2/conf-enabled/other-vhosts-access-log.conf
 
 case "${OSVER}" in
-	debian_11 |  debian_10 | ununtu_20.04 | ubuntu_22.04)
+	debian_11 |  debian_10 | ununtu_20.04 | ubuntu_22.04 | ubuntu_22.10 | linuxmint_21)
 		systemctl enable apache2.service
 		;;
 esac

@@ -519,7 +519,7 @@ function env($reset = null)
     $varname = "_$method";
     if ((isset($_SERVER['CONTENT_TYPE'])) && (strpos($_SERVER['CONTENT_TYPE'], 'application/json') === 0))
     {
-      // handle PUT/POST requests which have JSON in request body
+      // handle PUT//POST requests which have JSON in request body
       $GLOBALS[$varname] = json_decode(file_get_contents('php://input'), true);
     }
     elseif($method == 'PUT' || $method == 'DELETE')
@@ -906,7 +906,7 @@ function request_method($env = null)
 {
   if(is_null($env)) $env = env();
   $m = array_key_exists('REQUEST_METHOD', $env['SERVER']) ? $env['SERVER']['REQUEST_METHOD'] : null;
-  if($m == "POST" && array_key_exists('_method', $env['POST'])) 
+  if($m == "POST" && !is_null($env['POST']) && array_key_exists('_method', $env['POST'])) 
     $m = strtoupper($env['POST']['_method']);
   if(!in_array(strtoupper($m), request_methods()))
   {
@@ -1281,7 +1281,7 @@ function route_build($method, $path_or_array, $callback, $options = array())
 
   if($path[0] == "^")
   {
-    if($path{strlen($path) - 1} != "$") $path .= "$";
+    if($path[strlen($path) - 1] != "$") $path .= "$";
      $pattern = "#".$path."#i";
   }
   else if(empty($path) || $path == "/")
